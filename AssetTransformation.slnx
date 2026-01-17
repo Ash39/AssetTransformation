@@ -1,3 +1,4 @@
 <Solution>
+  <Project Path="AssetTransformation.Tests/AssetTransformation.Tests.csproj" Id="40f6d67b-d71d-4d1c-98e7-7b235709f262" />
   <Project Path="AssetTransformation/AssetTransformation.csproj" />
 </Solution>

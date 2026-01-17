@@ -16,16 +16,16 @@ namespace AssetTransformation
     /// <param name="sender">A reference to an object that may be modified or used during selection. The method may update this object to
     /// provide additional context or results.</param>
     /// <returns>A byte array containing the selected data. Returns an empty array if no matching data is found.</returns>
-    public delegate byte[] SelectDelegate(byte[] source, string name,ref object sender);
+    public delegate byte[] SelectDelegate(byte[] source, FileInfo info,ref object sender);
 
     /// <summary>
     /// Provides a collection-like interface for loading, transforming, filtering, and grouping files,
     /// supporting staged transformations and caching within an application-specific directory.
     /// </summary>
-    public class FileTransform : IEnumerator<(string, byte[])>, IEnumerable<(string, byte[])>
+    public class FileTransform : IEnumerator<(FileInfo info, byte[] data, object sender)>, IEnumerable<(FileInfo info, byte[] data, object sender)>
     {
         private readonly byte[][] filesBytes;
-        private readonly string[] fileNames;
+        private readonly FileInfo[] fileInfos;
         private readonly object[] senders;
         private readonly string appRootPath;
         private int index = -1;
@@ -47,13 +47,13 @@ namespace AssetTransformation
             if (files == null) throw new ArgumentNullException(nameof(files));
 
             filesBytes = new byte[files.Length][];
-            fileNames = new string[files.Length];
+            fileInfos = new FileInfo[files.Length];
             senders = new object[files.Length];
 
             for (int i = 0; i < files.Length; i++)
             {
                 filesBytes[i] = File.ReadAllBytes(files[i]);
-                fileNames[i] = Path.GetFileName(files[i]);
+                fileInfos[i] = new FileInfo(files[i]);
             }
 
             appRootPath = Path.Combine(
@@ -64,11 +64,11 @@ namespace AssetTransformation
             Directory.CreateDirectory(appRootPath);
         }
 
-        private FileTransform(string appRootPath, byte[][] filesBytes, string[] fileNames, object[] senders)
+        private FileTransform(string appRootPath, byte[][] filesBytes, FileInfo[] fileInfos, object[] senders)
         {
             this.appRootPath = appRootPath;
             this.filesBytes = filesBytes;
-            this.fileNames = fileNames;
+            this.fileInfos = fileInfos;
             this.senders = senders;
         }
 
@@ -98,15 +98,15 @@ namespace AssetTransformation
             for (int i = 0; i < filesBytes.Length; i++)
             {
                 byte[] inputBytes = filesBytes[i];
-                string fileName = fileNames[i];
+                FileInfo fileInfo = fileInfos[i];
 
-                byte[] hash = ComputeTransformHash(inputBytes, fileName, func);
+                byte[] hash = ComputeTransformHash(inputBytes, fileInfo.Name, func);
                 string cacheName = Convert.ToHexString(hash) + ".bin";
                 string cachePath = Path.Combine(stageFolder, cacheName);
 
                 if (!File.Exists(cachePath))
                 {
-                    byte[] transformed = func(inputBytes, fileName, ref senders[i]);
+                    byte[] transformed = func(inputBytes, fileInfo, ref senders[i]);
                     File.WriteAllBytes(cachePath, transformed);
                     CacheMiss?.Invoke();
                 }
@@ -114,7 +114,7 @@ namespace AssetTransformation
                 fileCaches[i] = File.ReadAllBytes(cachePath);
             }
 
-            return new FileTransform(appRootPath, fileCaches, fileNames, senders);
+            return new FileTransform(appRootPath, fileCaches, fileInfos, senders);
         }
 
         /// <summary>
@@ -148,15 +148,15 @@ namespace AssetTransformation
                 i =>
                 {
                     byte[] inputBytes = filesBytes[i];
-                    string fileName = fileNames[i];
+                    FileInfo fileInfo = fileInfos[i];
 
-                    byte[] hash = ComputeTransformHash(inputBytes, fileName, func);
+                    byte[] hash = ComputeTransformHash(inputBytes, fileInfo.Name, func);
                     string cacheName = Convert.ToHexString(hash) + ".bin";
                     string cachePath = Path.Combine(stageFolder, cacheName);
 
                     if (!File.Exists(cachePath))
                     {
-                        byte[] transformed = func(inputBytes, fileName, ref senders[i]);
+                        byte[] transformed = func(inputBytes, fileInfo, ref senders[i]);
                         File.WriteAllBytes(cachePath, transformed);
                         CacheMiss?.Invoke();
                     }
@@ -164,7 +164,7 @@ namespace AssetTransformation
                     fileCaches[i] = File.ReadAllBytes(cachePath);
                 });
 
-            return new FileTransform(appRootPath, fileCaches, fileNames, senders);
+            return new FileTransform(appRootPath, fileCaches, fileInfos, senders);
         }
 
         /// <summary>
@@ -177,25 +177,25 @@ namespace AssetTransformation
         /// <returns>A new FileTransform instance containing only the files for which the predicate returns <see
         /// langword="true"/>.</returns>
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="predicate"/> is <see langword="null"/>.</exception>
-        public FileTransform Where(Func<byte[], string, bool> predicate)
+        public FileTransform Where(Func<byte[], FileInfo, bool> predicate)
         {
             if (predicate == null) throw new ArgumentNullException(nameof(predicate));
 
             var filteredBytes = new List<byte[]>();
-            var filteredNames = new List<string>();
+            var filteredFileInfos = new List<FileInfo>();
             var filteredSenders = new List<object>();
 
             for (int i = 0; i < filesBytes.Length; i++)
             {
-                if (predicate(filesBytes[i], fileNames[i]))
+                if (predicate(filesBytes[i], fileInfos[i]))
                 {
                     filteredBytes.Add(filesBytes[i]);
-                    filteredNames.Add(fileNames[i]);
+                    filteredFileInfos.Add(fileInfos[i]);
                     filteredSenders.Add(senders[i]);
                 }
             }
 
-            return new FileTransform(appRootPath, [.. filteredBytes], [.. filteredNames], [.. filteredSenders]);
+            return new FileTransform(appRootPath, [.. filteredBytes], [.. filteredFileInfos], [.. filteredSenders]);
         }
 
         /// <summary>
@@ -217,19 +217,19 @@ namespace AssetTransformation
                 throw new InvalidOperationException("Cannot combine FileTransforms with different app roots.");
 
             byte[][] combinedBytes = new byte[this.filesBytes.Length + other.filesBytes.Length][];
-            string[] combinedNames = new string[this.fileNames.Length + other.fileNames.Length];
+            FileInfo[] combinedFileInfos = new FileInfo[this.fileInfos.Length + other.fileInfos.Length];
             object[] combinedSenders = new object[this.senders.Length + other.senders.Length];
 
             Array.Copy(this.filesBytes, 0, combinedBytes, 0, this.filesBytes.Length);
             Array.Copy(other.filesBytes, 0, combinedBytes, this.filesBytes.Length, other.filesBytes.Length);
 
-            Array.Copy(this.fileNames, 0, combinedNames, 0, this.fileNames.Length);
-            Array.Copy(other.fileNames, 0, combinedNames, this.fileNames.Length, other.fileNames.Length);
+            Array.Copy(this.fileInfos, 0, combinedFileInfos, 0, this.fileInfos.Length);
+            Array.Copy(other.fileInfos, 0, combinedFileInfos, this.fileInfos.Length, other.fileInfos.Length);
 
             Array.Copy(this.senders, 0, combinedSenders, 0, this.senders.Length);
             Array.Copy(other.senders, 0, combinedSenders, this.senders.Length, other.senders.Length);
 
-            return new FileTransform(appRootPath, combinedBytes, combinedNames, combinedSenders);
+            return new FileTransform(appRootPath, combinedBytes, combinedFileInfos, combinedSenders);
         }
 
         /// <summary>
@@ -251,37 +251,37 @@ namespace AssetTransformation
             var regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
             var matchBytes = new List<byte[]>();
-            var matchNames = new List<string>();
+            var matchFileInfos = new List<FileInfo>();
             var matchSenders = new List<object>();
 
             var nonMatchBytes = new List<byte[]>();
-            var nonMatchNames = new List<string>();
+            var nonMatchFileInfos = new List<FileInfo>();
             var nonMatchSenders = new List<object>();
 
             for (int i = 0; i < filesBytes.Length; i++)
             {
-                string name = fileNames[i];
+                FileInfo info = fileInfos[i];
                 byte[] bytes = filesBytes[i];
                 object sender = senders[i];
 
-                if (regex.IsMatch(name))
+                if (regex.IsMatch(info.Name))
                 {
                     matchBytes.Add(bytes);
-                    matchNames.Add(name);
+                    matchFileInfos.Add(info);
                     matchSenders.Add(sender);
                 }
                 else
                 {
                     nonMatchBytes.Add(bytes);
-                    nonMatchNames.Add(name);
+                    nonMatchFileInfos.Add(info);
                     nonMatchSenders.Add(sender);
                 }
             }
 
             return new[]
             {
-                new FileTransform(appRootPath, [.. matchBytes], [.. matchNames], [.. matchSenders]),
-                new FileTransform(appRootPath, [.. nonMatchBytes], [.. nonMatchNames], [.. nonMatchSenders])
+                new FileTransform(appRootPath, [.. matchBytes], [.. matchFileInfos], [.. matchSenders]),
+                new FileTransform(appRootPath, [.. nonMatchBytes], [.. nonMatchFileInfos], [.. nonMatchSenders])
             };
         }
 
@@ -382,19 +382,19 @@ namespace AssetTransformation
         {
             if (keySelector == null) throw new ArgumentNullException(nameof(keySelector));
 
-            var groups = new Dictionary<string, List<(byte[] Bytes, string Name, object Sender)>>();
+            var groups = new Dictionary<string, List<(byte[] Bytes, FileInfo Info, object Sender)>>();
 
             for (int i = 0; i < filesBytes.Length; i++)
             {
-                string key = keySelector(filesBytes[i], fileNames[i]) ?? string.Empty;
+                string key = keySelector(filesBytes[i], fileInfos[i].Name) ?? string.Empty;
 
                 if (!groups.TryGetValue(key, out var list))
                 {
-                    list = new List<(byte[] Bytes, string Name, object Sender)>();
+                    list = new List<(byte[] Bytes, FileInfo Info, object Sender)>();
                     groups[key] = list;
                 }
 
-                list.Add((filesBytes[i], fileNames[i], senders[i]));
+                list.Add((filesBytes[i], fileInfos[i], senders[i]));
             }
 
             var result = new Dictionary<string, FileTransform>();
@@ -402,10 +402,10 @@ namespace AssetTransformation
             foreach (var kvp in groups)
             {
                 var bytes = kvp.Value.Select(v => v.Bytes).ToArray();
-                var names = kvp.Value.Select(v => v.Name).ToArray();
+                var infos = kvp.Value.Select(v => v.Info).ToArray();
                 var senders = kvp.Value.Select(v => v.Sender).ToArray();
 
-                result[kvp.Key] = new FileTransform(appRootPath, bytes, names, senders);
+                result[kvp.Key] = new FileTransform(appRootPath, bytes, infos, senders);
             }
 
             return result;
@@ -507,7 +507,7 @@ namespace AssetTransformation
         }
 
         /// <inheritdoc/>
-        public IEnumerator<(string, byte[])> GetEnumerator()
+        public IEnumerator<(FileInfo, byte[], object)> GetEnumerator()
         {
             return this;
         }
@@ -523,14 +523,14 @@ namespace AssetTransformation
         /// <remarks>Each element in the array is a tuple where the first item is the file name and the
         /// second item is the file's content as a byte array. The order of elements corresponds to the order in which
         /// the files were processed.</remarks>
-        public (string, byte[])[] Results
+        public (FileInfo info, byte[] data, object sender)[] Results
         {
             get
             {
-                var results = new (string, byte[])[filesBytes.Length];
+                var results = new (FileInfo info, byte[] data, object sender)[filesBytes.Length];
                 for (int i = 0; i < filesBytes.Length; i++)
                 {
-                    results[i] = (fileNames[i], filesBytes[i]);
+                    results[i] = (fileInfos[i], filesBytes[i], senders[i]);
                 }
                 return results;
             }
@@ -542,7 +542,7 @@ namespace AssetTransformation
         /// <remarks>The first item of the tuple is the file name as a string; the second item is the
         /// file's content as a byte array. The returned values reflect the current position within the underlying
         /// collection.</remarks>
-        public (string, byte[]) Current => (fileNames[index], filesBytes[index]);
+        public (FileInfo info, byte[] data, object sender) Current => (fileInfos[index], filesBytes[index], senders[index]);
 
         object IEnumerator.Current => Current;
     }

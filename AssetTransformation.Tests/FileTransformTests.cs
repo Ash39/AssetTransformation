@@ -197,9 +197,9 @@ namespace AssetTransformation.Tests
 
             Assert.Equal(files.Length, results.Length);
 
-            foreach (var (name, bytes) in results)
+            foreach (var (info, bytes, sender) in results)
             {
-                string originalPath = files.First(f => Path.GetFileName(f) == name);
+                string originalPath = files.First(f => Path.GetFileName(f) == info.Name);
                 byte[] originalBytes = File.ReadAllBytes(originalPath);
 
                 Assert.Equal(originalBytes, bytes);
@@ -215,7 +215,7 @@ namespace AssetTransformation.Tests
 
             int callCount = 0;
 
-            byte[] Transform(byte[] data, string name, ref object sender)
+            byte[] Transform(byte[] data, FileInfo info, ref object sender)
             {
                 return data.Reverse().ToArray();
             }
@@ -249,7 +249,7 @@ namespace AssetTransformation.Tests
 
             int callCount = 0;
 
-            byte[] Transform(byte[] data, string name, ref object sender)
+            byte[] Transform(byte[] data, FileInfo info, ref object sender)
             {
                 return data.Reverse().ToArray();
             }
@@ -281,7 +281,7 @@ namespace AssetTransformation.Tests
 
             var ft = new FileTransform(_appName, files);
 
-            byte[] Transform(byte[] data, string name, ref object sender)
+            byte[] Transform(byte[] data, FileInfo info, ref object sender)
             {
                 return SHA256.HashData(data);
             }
@@ -308,9 +308,9 @@ namespace AssetTransformation.Tests
 
             var ft = new FileTransform(_appName, files);
 
-            var txtOnly = ft.Where((bytes, name) => name.EndsWith(".txt", StringComparison.OrdinalIgnoreCase));
+            var txtOnly = ft.Where((bytes, info) => info.Extension.Equals(".txt", StringComparison.OrdinalIgnoreCase));
 
-            Assert.All(txtOnly.Results, r => Assert.EndsWith(".txt", r.Item1, StringComparison.OrdinalIgnoreCase));
+            Assert.All(txtOnly.Results, r => Assert.Equal(".txt", r.Item1.Extension));
         }
 
         [Fact]
@@ -325,7 +325,7 @@ namespace AssetTransformation.Tests
 
             Assert.Equal(files.Length, combined.Results.Length);
 
-            var combinedNames = combined.Results.Select(r => r.Item1).ToArray();
+            var combinedNames = combined.Results.Select(r => r.Item1.Name).ToArray();
             var originalNames = files.Select(Path.GetFileName).ToArray();
 
             Assert.Equal(originalNames, combinedNames);
@@ -343,7 +343,7 @@ namespace AssetTransformation.Tests
             var matches = split[0];
             var nonMatches = split[1];
 
-            Assert.All(matches.Results, r => Assert.EndsWith(".txt", r.Item1, StringComparison.OrdinalIgnoreCase));
+            Assert.All(matches.Results, r => Assert.Equal(".txt", r.Item1.Extension));
             //Assert.All(nonMatches.Results, r => Assert.EndsWith(".txt", r.Item1, StringComparison.OrdinalIgnoreCase));
         }
 
@@ -361,7 +361,7 @@ namespace AssetTransformation.Tests
                 string ext = kvp.Key;
                 var groupFt = kvp.Value;
 
-                Assert.All(groupFt.Results, r => Assert.Equal(ext, Path.GetExtension(r.Item1)));
+                Assert.All(groupFt.Results, r => Assert.Equal(ext, r.Item1.Extension));
             }
         }
 
@@ -373,7 +373,7 @@ namespace AssetTransformation.Tests
             var ft = new FileTransform(_appName, files);
 
             int count = 0;
-            foreach (var (name, bytes) in ft)
+            foreach (var (name, bytes, sender) in ft)
             {
                 Assert.NotNull(name);
                 Assert.NotNull(bytes);
@@ -396,7 +396,7 @@ namespace AssetTransformation.Tests
 
             for (int i = 0; i < files.Length; i++)
             {
-                Assert.Equal(Path.GetFileName(files[i]), results[i].Item1);
+                Assert.Equal(Path.GetFileName(files[i]), results[i].Item1.Name);
             }
         }
     }

@@ -11,22 +11,17 @@ namespace AssetTransformation
     /// Represents a method that selects and returns a byte array based on the provided source data and name, optionally
     /// modifying the sender object.
     /// </summary>
-    /// <param name="source">The source byte array from which data is selected. Cannot be null.</param>
-    /// <param name="name">The name or key used to identify the data to select from the source. Cannot be null or empty.</param>
-    /// <param name="sender">A reference to an object that may be modified or used during selection. The method may update this object to
-    /// provide additional context or results.</param>
+    /// <param name="result">The result of a file transformation, including file metadata, transformed data, and any additional data.</param>
     /// <returns>A byte array containing the selected data. Returns an empty array if no matching data is found.</returns>
-    public delegate byte[] SelectDelegate(byte[] source, FileInfo info,ref object sender);
+    public delegate byte[] SelectDelegate(TransformResult result);
 
     /// <summary>
     /// Provides a collection-like interface for loading, transforming, filtering, and grouping files,
     /// supporting staged transformations and caching within an application-specific directory.
     /// </summary>
-    public class FileTransform : IEnumerator<(FileInfo info, byte[] data, object sender)>, IEnumerable<(FileInfo info, byte[] data, object sender)>
+    public class FileTransform : IEnumerator<TransformResult>, IEnumerable<TransformResult>
     {
-        private readonly byte[][] filesBytes;
-        private readonly FileInfo[] fileInfos;
-        private readonly object[] senders;
+        private readonly TransformResult[] transforms;
         private readonly string appRootPath;
         private int index = -1;
 
@@ -44,16 +39,13 @@ namespace AssetTransformation
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="files"/> is <see langword="null"/>.</exception>
         public FileTransform(string appName, string[] files)
         {
-            if (files == null) throw new ArgumentNullException(nameof(files));
+            ArgumentNullException.ThrowIfNull(files);
 
-            filesBytes = new byte[files.Length][];
-            fileInfos = new FileInfo[files.Length];
-            senders = new object[files.Length];
+            transforms = new TransformResult[files.Length];
 
             for (int i = 0; i < files.Length; i++)
             {
-                filesBytes[i] = File.ReadAllBytes(files[i]);
-                fileInfos[i] = new FileInfo(files[i]);
+                transforms[i] = new TransformResult(new FileInfo(files[i]), File.ReadAllBytes(files[i]),string.Empty);
             }
 
             appRootPath = Path.Combine(
@@ -64,12 +56,10 @@ namespace AssetTransformation
             Directory.CreateDirectory(appRootPath);
         }
 
-        private FileTransform(string appRootPath, byte[][] filesBytes, FileInfo[] fileInfos, object[] senders)
+        private FileTransform(string appRootPath, TransformResult[] transforms)
         {
             this.appRootPath = appRootPath;
-            this.filesBytes = filesBytes;
-            this.fileInfos = fileInfos;
-            this.senders = senders;
+            this.transforms = transforms;
         }
 
         /// <summary>
@@ -81,40 +71,52 @@ namespace AssetTransformation
         /// same transformation multiple times.</remarks>
         /// <param name="stage">The name of the transformation stage. Used to organize cached results for this stage. Cannot be null.</param>
         /// <param name="func">A function that transforms the contents of each file. The function receives the file's byte array, its
-        /// name and an optional object representing the sender or context for the transformation, and returns the transformed byte array. 
+        /// metadata and an optional string representing the sender or context for the transformation, and returns the transformed byte array. 
         /// Cannot be null.</param>
         /// <returns>A new FileTransform instance containing the transformed files for the specified stage.</returns>
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="stage"/> or <paramref name="func"/> is null.</exception>
         public FileTransform Select(string stage, SelectDelegate func)
         {
-            if (stage == null) throw new ArgumentNullException(nameof(stage));
-            if (func == null) throw new ArgumentNullException(nameof(func));
+            ArgumentNullException.ThrowIfNull(stage);
+            ArgumentNullException.ThrowIfNull(func);
 
             string stageFolder = Path.Combine(appRootPath, stage);
             Directory.CreateDirectory(stageFolder);
 
-            byte[][] fileCaches = new byte[filesBytes.Length][];
+            TransformResult[] fileCaches = new TransformResult[transforms.Length];
 
-            for (int i = 0; i < filesBytes.Length; i++)
+            List<string> cachedFiles = [.. Directory.GetFiles(stageFolder).Select(f => Path.GetFileName(f))];
+
+            for (int i = 0; i < transforms.Length; i++)
             {
-                byte[] inputBytes = filesBytes[i];
-                FileInfo fileInfo = fileInfos[i];
+                TransformResult result = transforms[i];
 
-                byte[] hash = ComputeTransformHash(inputBytes, fileInfo.Name, func);
+                byte[] hash = ComputeTransformHash(result.Data, result.Info.Name, func);
                 string cacheName = Convert.ToHexString(hash) + ".bin";
                 string cachePath = Path.Combine(stageFolder, cacheName);
-
+                
                 if (!File.Exists(cachePath))
                 {
-                    byte[] transformed = func(inputBytes, fileInfo, ref senders[i]);
+                    byte[] transformed = func(result);
                     File.WriteAllBytes(cachePath, transformed);
+                    File.WriteAllText(cachePath + ".json", result.AdditionalInfo);
                     CacheMiss?.Invoke();
-                }
 
-                fileCaches[i] = File.ReadAllBytes(cachePath);
+                    fileCaches[i] = new(result.Info, transformed, result.AdditionalInfo);
+                }
+                else
+                {
+                    cachedFiles.Remove(cacheName);
+                    fileCaches[i] = new(result.Info, File.ReadAllBytes(cachePath), File.ReadAllText(cachePath + ".json"));
+                }
             }
 
-            return new FileTransform(appRootPath, fileCaches, fileInfos, senders);
+            foreach (var filePath in cachedFiles)
+            {
+                File.Delete(filePath);
+            }
+
+            return new FileTransform(appRootPath, fileCaches);
         }
 
         /// <summary>
@@ -127,44 +129,52 @@ namespace AssetTransformation
         /// <param name="stage">The name of the processing stage. Used to determine the output folder for cached transformed files. Cannot
         /// be null.</param>
         /// <param name="func">A function that transforms the contents of each file. The function receives the file's byte array, its
-        /// name and an optional object representing the sender or context for the transformation, and returns the transformed byte array. 
+        /// metadata and an optional string representing the sender or context for the transformation, and returns the transformed byte array. 
         /// Cannot be null. Must be thread-safe.</param>
         /// <returns>A FileTransform instance containing the transformed file data and associated file names.</returns>
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="stage"/> or <paramref name="func"/> is null.</exception>
         public FileTransform SelectMultiThread(string stage, SelectDelegate func)
         {
-            if (stage == null) throw new ArgumentNullException(nameof(stage));
-            if (func == null) throw new ArgumentNullException(nameof(func));
+            ArgumentNullException.ThrowIfNull(stage);
+            ArgumentNullException.ThrowIfNull(func);
 
             string stageFolder = Path.Combine(appRootPath, stage);
             Directory.CreateDirectory(stageFolder);
 
-            byte[][] fileCaches = new byte[filesBytes.Length][];
+            TransformResult[] fileCaches = new TransformResult[transforms.Length];
 
-            Parallel.For(
-                0,
-                filesBytes.Length,
-                new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },
-                i =>
+            List<string> cachedFiles = [.. Directory.GetFiles(stageFolder).Select(f => Path.GetFileName(f))];
+
+            Parallel.For( 0, transforms.Length, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount },  i =>
+            {
+                TransformResult result = transforms[i];
+
+                byte[] hash = ComputeTransformHash(result.Data, result.Info.Name, func);
+                string cacheName = Convert.ToHexString(hash) + ".bin";
+                string cachePath = Path.Combine(stageFolder, cacheName);
+
+                if (!File.Exists(cachePath))
                 {
-                    byte[] inputBytes = filesBytes[i];
-                    FileInfo fileInfo = fileInfos[i];
+                    byte[] transformed = func(result);
+                    File.WriteAllBytes(cachePath, transformed);
+                    File.WriteAllText(cachePath + ".json", result.AdditionalInfo);
+                    CacheMiss?.Invoke();
 
-                    byte[] hash = ComputeTransformHash(inputBytes, fileInfo.Name, func);
-                    string cacheName = Convert.ToHexString(hash) + ".bin";
-                    string cachePath = Path.Combine(stageFolder, cacheName);
+                    fileCaches[i] = new(result.Info, transformed, result.AdditionalInfo);
+                }
+                else
+                {
+                    cachedFiles.Remove(cacheName);
+                    fileCaches[i] = new(result.Info, File.ReadAllBytes(cachePath), File.ReadAllText(cachePath + ".json"));
+                }
+            });
 
-                    if (!File.Exists(cachePath))
-                    {
-                        byte[] transformed = func(inputBytes, fileInfo, ref senders[i]);
-                        File.WriteAllBytes(cachePath, transformed);
-                        CacheMiss?.Invoke();
-                    }
+            foreach (var filePath in cachedFiles)
+            {
+                File.Delete(filePath);
+            }
 
-                    fileCaches[i] = File.ReadAllBytes(cachePath);
-                });
-
-            return new FileTransform(appRootPath, fileCaches, fileInfos, senders);
+            return new FileTransform(appRootPath, fileCaches);
         }
 
         /// <summary>
@@ -172,30 +182,26 @@ namespace AssetTransformation
         /// containing only the files that match the condition.
         /// </summary>
         /// <param name="predicate">A function that determines whether a file should be included in the result. The function receives the file's
-        /// byte array and its name as parameters and returns <see langword="true"/> to include the file; otherwise,
+        /// byte array, its file metadata and any additional information provided as parameters and returns <see langword="true"/> to include the file; otherwise,
         /// <see langword="false"/>.</param>
         /// <returns>A new FileTransform instance containing only the files for which the predicate returns <see
         /// langword="true"/>.</returns>
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="predicate"/> is <see langword="null"/>.</exception>
-        public FileTransform Where(Func<byte[], FileInfo, bool> predicate)
+        public FileTransform Where(Func<TransformResult, bool> predicate)
         {
-            if (predicate == null) throw new ArgumentNullException(nameof(predicate));
+            ArgumentNullException.ThrowIfNull(predicate);
 
-            var filteredBytes = new List<byte[]>();
-            var filteredFileInfos = new List<FileInfo>();
-            var filteredSenders = new List<object>();
+            var filteredTransforms = new List<TransformResult>();
 
-            for (int i = 0; i < filesBytes.Length; i++)
+            for (int i = 0; i < transforms.Length; i++)
             {
-                if (predicate(filesBytes[i], fileInfos[i]))
+                if (predicate(transforms[i]))
                 {
-                    filteredBytes.Add(filesBytes[i]);
-                    filteredFileInfos.Add(fileInfos[i]);
-                    filteredSenders.Add(senders[i]);
+                    filteredTransforms.Add(transforms[i]);
                 }
             }
 
-            return new FileTransform(appRootPath, [.. filteredBytes], [.. filteredFileInfos], [.. filteredSenders]);
+            return new FileTransform(appRootPath, [.. filteredTransforms]);
         }
 
         /// <summary>
@@ -212,24 +218,16 @@ namespace AssetTransformation
         /// <exception cref="InvalidOperationException">Thrown if <paramref name="other"/> has a different application root path than the current instance.</exception>
         public FileTransform Concat(FileTransform other)
         {
-            if (other == null) throw new ArgumentNullException(nameof(other));
+            ArgumentNullException.ThrowIfNull(other);
             if (this.appRootPath != other.appRootPath)
                 throw new InvalidOperationException("Cannot combine FileTransforms with different app roots.");
 
-            byte[][] combinedBytes = new byte[this.filesBytes.Length + other.filesBytes.Length][];
-            FileInfo[] combinedFileInfos = new FileInfo[this.fileInfos.Length + other.fileInfos.Length];
-            object[] combinedSenders = new object[this.senders.Length + other.senders.Length];
+            TransformResult[] combinedtransforms = new TransformResult[this.transforms.Length + other.transforms.Length];
 
-            Array.Copy(this.filesBytes, 0, combinedBytes, 0, this.filesBytes.Length);
-            Array.Copy(other.filesBytes, 0, combinedBytes, this.filesBytes.Length, other.filesBytes.Length);
+            Array.Copy(this.transforms, 0, combinedtransforms, 0, this.transforms.Length);
+            Array.Copy(other.transforms, 0, combinedtransforms, this.transforms.Length, other.transforms.Length);
 
-            Array.Copy(this.fileInfos, 0, combinedFileInfos, 0, this.fileInfos.Length);
-            Array.Copy(other.fileInfos, 0, combinedFileInfos, this.fileInfos.Length, other.fileInfos.Length);
-
-            Array.Copy(this.senders, 0, combinedSenders, 0, this.senders.Length);
-            Array.Copy(other.senders, 0, combinedSenders, this.senders.Length, other.senders.Length);
-
-            return new FileTransform(appRootPath, combinedBytes, combinedFileInfos, combinedSenders);
+            return new FileTransform(appRootPath, combinedtransforms);
         }
 
         /// <summary>
@@ -246,43 +244,33 @@ namespace AssetTransformation
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="pattern"/> is <see langword="null"/>.</exception>
         public FileTransform[] Split(string pattern)
         {
-            if (pattern == null) throw new ArgumentNullException(nameof(pattern));
+            ArgumentNullException.ThrowIfNull(pattern);
 
             var regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-            var matchBytes = new List<byte[]>();
-            var matchFileInfos = new List<FileInfo>();
-            var matchSenders = new List<object>();
+            var matchResults = new List<TransformResult>();
 
-            var nonMatchBytes = new List<byte[]>();
-            var nonMatchFileInfos = new List<FileInfo>();
-            var nonMatchSenders = new List<object>();
+            var nonMatchResults = new List<TransformResult>();
 
-            for (int i = 0; i < filesBytes.Length; i++)
+            for (int i = 0; i < transforms.Length; i++)
             {
-                FileInfo info = fileInfos[i];
-                byte[] bytes = filesBytes[i];
-                object sender = senders[i];
+                TransformResult result = transforms[i];
 
-                if (regex.IsMatch(info.Name))
+                if (regex.IsMatch(result.Info.Name))
                 {
-                    matchBytes.Add(bytes);
-                    matchFileInfos.Add(info);
-                    matchSenders.Add(sender);
+                    matchResults.Add(result);
                 }
                 else
                 {
-                    nonMatchBytes.Add(bytes);
-                    nonMatchFileInfos.Add(info);
-                    nonMatchSenders.Add(sender);
+                    nonMatchResults.Add(result);
                 }
             }
 
-            return new[]
-            {
-                new FileTransform(appRootPath, [.. matchBytes], [.. matchFileInfos], [.. matchSenders]),
-                new FileTransform(appRootPath, [.. nonMatchBytes], [.. nonMatchFileInfos], [.. nonMatchSenders])
-            };
+            return
+            [
+                new FileTransform(appRootPath, [.. matchResults]),
+                new FileTransform(appRootPath, [.. nonMatchResults])
+            ];
         }
 
         /// <summary>
@@ -336,7 +324,7 @@ namespace AssetTransformation
         /// <exception cref="KeyNotFoundException">
         /// Thrown if a specified group key does not exist.
         /// </exception>
-        public FileTransform SplitBy(Func<byte[], string, string> keySelector, params (string key, Func<FileTransform, FileTransform> func)[] funcs)
+        public FileTransform SplitBy(Func<TransformResult, string, string> keySelector, params (string, Func<FileTransform, FileTransform> func)[] funcs)
         {
             Dictionary<string, FileTransform> groups = SplitBy(keySelector);
 
@@ -346,8 +334,7 @@ namespace AssetTransformation
             {
                 var (key, func) = funcs[i];
 
-                if (func == null)
-                    throw new ArgumentNullException(nameof(func));
+                ArgumentNullException.ThrowIfNull(func);
 
                 if (!groups.TryGetValue(key, out var transform))
                     throw new KeyNotFoundException($"No group found for key '{key}'.");
@@ -374,38 +361,34 @@ namespace AssetTransformation
         /// <remarks>If the selector returns <see langword="null"/>, the file is grouped under an empty
         /// string key. Each group contains a new FileTransform instance with the files that share the same
         /// key.</remarks>
-        /// <param name="keySelector">A function that takes the file's byte array and name, and returns a string key used to group files.</param>
+        /// <param name="keySelector">A function that takes the file's byte array, additional information and metadata, and returns a string key used to group files.</param>
         /// <returns>A dictionary where each key is a group identifier returned by the selector, and each value is a
         /// FileTransform containing the files in that group.</returns>
         /// <exception cref="ArgumentNullException">Thrown if <paramref name="keySelector"/> is <see langword="null"/>.</exception>
-        public Dictionary<string, FileTransform> SplitBy(Func<byte[], string, string> keySelector)
+        public Dictionary<string, FileTransform> SplitBy(Func<TransformResult, string, string> keySelector)
         {
-            if (keySelector == null) throw new ArgumentNullException(nameof(keySelector));
+            ArgumentNullException.ThrowIfNull(keySelector);
 
-            var groups = new Dictionary<string, List<(byte[] Bytes, FileInfo Info, object Sender)>>();
+            var groups = new Dictionary<string, List<TransformResult>>();
 
-            for (int i = 0; i < filesBytes.Length; i++)
+            for (int i = 0; i < transforms.Length; i++)
             {
-                string key = keySelector(filesBytes[i], fileInfos[i].Name) ?? string.Empty;
+                string key = keySelector(transforms[i], transforms[i].Info.Name) ?? string.Empty;
 
                 if (!groups.TryGetValue(key, out var list))
                 {
-                    list = new List<(byte[] Bytes, FileInfo Info, object Sender)>();
+                    list = [];
                     groups[key] = list;
                 }
 
-                list.Add((filesBytes[i], fileInfos[i], senders[i]));
+                list.Add(transforms[i]);
             }
 
             var result = new Dictionary<string, FileTransform>();
 
             foreach (var kvp in groups)
             {
-                var bytes = kvp.Value.Select(v => v.Bytes).ToArray();
-                var infos = kvp.Value.Select(v => v.Info).ToArray();
-                var senders = kvp.Value.Select(v => v.Sender).ToArray();
-
-                result[kvp.Key] = new FileTransform(appRootPath, bytes, infos, senders);
+                result[kvp.Key] = new FileTransform(appRootPath, kvp.Value.ToArray());
             }
 
             return result;
@@ -440,7 +423,7 @@ namespace AssetTransformation
             MethodBody? body = method.GetMethodBody();
 
             if (body == null)
-                return Array.Empty<byte>();
+                return [];
 
             byte[] il = body.GetILAsByteArray()!;
             return SHA256.HashData(il);
@@ -450,7 +433,7 @@ namespace AssetTransformation
         {
             object? target = del.Target;
             if (target == null)
-                return Array.Empty<byte>();
+                return [];
 
             var fields = target.GetType()
                 .GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
@@ -480,7 +463,7 @@ namespace AssetTransformation
         {
             int currentIndex = index;
             int nextIndex = currentIndex + 1;
-            if (filesBytes.Length > nextIndex)
+            if (transforms.Length > nextIndex)
             {
                 index = nextIndex;
                 return true;
@@ -504,10 +487,11 @@ namespace AssetTransformation
         public void Dispose()
         {
             index = -1;
+            GC.SuppressFinalize(this);
         }
 
         /// <inheritdoc/>
-        public IEnumerator<(FileInfo, byte[], object)> GetEnumerator()
+        public IEnumerator<TransformResult> GetEnumerator()
         {
             return this;
         }
@@ -520,29 +504,15 @@ namespace AssetTransformation
         /// <summary>
         /// Gets an array containing the names and contents of all processed files.
         /// </summary>
-        /// <remarks>Each element in the array is a tuple where the first item is the file name and the
-        /// second item is the file's content as a byte array. The order of elements corresponds to the order in which
-        /// the files were processed.</remarks>
-        public (FileInfo info, byte[] data, object sender)[] Results
-        {
-            get
-            {
-                var results = new (FileInfo info, byte[] data, object sender)[filesBytes.Length];
-                for (int i = 0; i < filesBytes.Length; i++)
-                {
-                    results[i] = (fileInfos[i], filesBytes[i], senders[i]);
-                }
-                return results;
-            }
-        }
+        /// <remarks>Each element in the array is a <see cref="TransformResult"/>.
+        /// The order of elements corresponds to the order in which the files were processed.</remarks>
+        public TransformResult[] Results => transforms;
 
         /// <summary>
-        /// Gets the current file name and its associated byte content as a tuple.
+        /// Gets the current file name and its associated byte content as a <see cref="TransformResult"/>.
         /// </summary>
-        /// <remarks>The first item of the tuple is the file name as a string; the second item is the
-        /// file's content as a byte array. The returned values reflect the current position within the underlying
-        /// collection.</remarks>
-        public (FileInfo info, byte[] data, object sender) Current => (fileInfos[index], filesBytes[index], senders[index]);
+        /// <remarks>The returned values reflect the current position within the underlying collection.</remarks>
+        public TransformResult Current => transforms[index];
 
         object IEnumerator.Current => Current;
     }

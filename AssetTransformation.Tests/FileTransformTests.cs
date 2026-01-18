@@ -1,6 +1,7 @@
 ﻿using StbImageSharp;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using static System.Net.Mime.MediaTypeNames;
 
 namespace AssetTransformation.Tests
@@ -59,23 +60,28 @@ namespace AssetTransformation.Tests
         {
             FileTransform fileTransform = new FileTransform(_appName, GetAssetFiles());
 
+            JsonSerializerOptions options = new JsonSerializerOptions()
+            {
+                IncludeFields = true
+            };
+
             FileTransform result = fileTransform.Split("\\.(png|jpg)$", (imageTransform) => 
             {
-                return imageTransform.SelectMultiThread("StbImageLoad", (source, name, ref sender) =>
+                return imageTransform.SelectMultiThread("StbImageLoad", (result) =>
                 {
-                    ImageResult image = ImageResult.FromMemory(source);
+                    ImageResult image = ImageResult.FromMemory(result.Data);
 
-                    sender = (image.Width, image.Height, image.SourceComp);
+                    result.AdditionalInfo = JsonSerializer.Serialize((image.Width, image.Height, image.SourceComp), options);
 
                     return image.Data;
                 })
-                .Select("FlipImage", (source, name, ref sender) =>
+                .Select("FlipImage", (result) =>
                 {
-                    (int Width, int Height, ColorComponents comp) = ((int, int, ColorComponents))sender;
+                    (int Width, int Height, ColorComponents comp) = JsonSerializer.Deserialize<(int, int, ColorComponents)>(result.AdditionalInfo, options);
 
-                    byte[] copiedBytes = new byte[source.Length];
+                    byte[] copiedBytes = new byte[result.Data.Length];
 
-                    Array.Copy(source, copiedBytes, source.Length);
+                    Array.Copy(result.Data, copiedBytes, result.Data.Length);
 
                     unsafe
                     {
@@ -85,8 +91,8 @@ namespace AssetTransformation.Tests
                         }
                     }
 
-                    Assert.Equal(copiedBytes.Length, source.Length);
-                    Assert.NotEqual(source, copiedBytes);
+                    Assert.Equal(copiedBytes.Length, result.Data.Length);
+                    Assert.NotEqual(result.Data, copiedBytes);
 
                     return copiedBytes;
                 });
@@ -106,15 +112,15 @@ namespace AssetTransformation.Tests
 
             var result = transform.Split(
                 pattern: @"\.txt$",
-                match: t => t.Select("SplitMatch", (b, _, ref _) => Bytes("M")),
-                nonMatch: t => t.Select("SplitNon", (b, _, ref _) => Bytes("N"))
+                match: t => t.Select("SplitMatch", (r) => Bytes("M")),
+                nonMatch: t => t.Select("SplitNon", (r) => Bytes("N"))
             );
 
             var outputs = result.Results;
 
             Assert.Equal(2, outputs.Length);
-            Assert.Equal("M", Encoding.UTF8.GetString(outputs[0].Item2));
-            Assert.Equal("N", Encoding.UTF8.GetString(outputs[1].Item2));
+            Assert.Equal("M", Encoding.UTF8.GetString(outputs[0].Data));
+            Assert.Equal("N", Encoding.UTF8.GetString(outputs[1].Data));
         }
 
         [Fact]
@@ -145,17 +151,17 @@ namespace AssetTransformation.Tests
                 keySelector: (bytes, name) =>
                     name.EndsWith(".txt") ? "text" : "bin",
 
-                ("bin", t => t.Select("SplitByBin", (b, _, ref _) => Bytes("B"))),
-                ("text", t => t.Select("SplitByText", (b, _, ref _) => Bytes("T")))
+                ("bin", t => t.Select("SplitByBin", (r) => Bytes("B"))),
+                ("text", t => t.Select("SplitByText", (r) => Bytes("T")))
             );
 
             var outputs = result.Results;
 
             Assert.Equal(3, outputs.Length);
 
-            Assert.Equal("B", Encoding.UTF8.GetString(outputs[0].Item2));
-            Assert.Equal("T", Encoding.UTF8.GetString(outputs[1].Item2));
-            Assert.Equal("T", Encoding.UTF8.GetString(outputs[2].Item2));
+            Assert.Equal("B", Encoding.UTF8.GetString(outputs[0].Data));
+            Assert.Equal("T", Encoding.UTF8.GetString(outputs[1].Data));
+            Assert.Equal("T", Encoding.UTF8.GetString(outputs[2].Data));
         }
 
         [Fact]
@@ -197,12 +203,12 @@ namespace AssetTransformation.Tests
 
             Assert.Equal(files.Length, results.Length);
 
-            foreach (var (info, bytes, sender) in results)
+            foreach (var result in results)
             {
-                string originalPath = files.First(f => Path.GetFileName(f) == info.Name);
+                string originalPath = files.First(f => Path.GetFileName(f) == result.Info.Name);
                 byte[] originalBytes = File.ReadAllBytes(originalPath);
 
-                Assert.Equal(originalBytes, bytes);
+                Assert.Equal(originalBytes, result.Data);
             }
         }
 
@@ -215,9 +221,9 @@ namespace AssetTransformation.Tests
 
             int callCount = 0;
 
-            byte[] Transform(byte[] data, FileInfo info, ref object sender)
+            byte[] Transform(TransformResult result)
             {
-                return data.Reverse().ToArray();
+                return result.Data.Reverse().ToArray();
             }
 
             ft.CacheMiss += () => callCount++;
@@ -236,7 +242,7 @@ namespace AssetTransformation.Tests
             for (int i = 0; i < results.Length; i++)
             {
                 var original = File.ReadAllBytes(files[i]);
-                Assert.Equal(original.Reverse().ToArray(), results[i].Item2);
+                Assert.Equal(original.Reverse().ToArray(), results[i].Data);
             }
         }
 
@@ -249,9 +255,9 @@ namespace AssetTransformation.Tests
 
             int callCount = 0;
 
-            byte[] Transform(byte[] data, FileInfo info, ref object sender)
+            byte[] Transform(TransformResult result)
             {
-                return data.Reverse().ToArray();
+                return result.Data.Reverse().ToArray();
             }
 
             ft.CacheMiss += () => callCount++;
@@ -270,7 +276,7 @@ namespace AssetTransformation.Tests
             for (int i = 0; i < results.Length; i++)
             {
                 var original = File.ReadAllBytes(files[i]);
-                Assert.Equal(original.Reverse().ToArray(), results[i].Item2);
+                Assert.Equal(original.Reverse().ToArray(), results[i].Data);
             }
         }
 
@@ -281,9 +287,9 @@ namespace AssetTransformation.Tests
 
             var ft = new FileTransform(_appName, files);
 
-            byte[] Transform(byte[] data, FileInfo info, ref object sender)
+            byte[] Transform(TransformResult result)
             {
-                return SHA256.HashData(data);
+                return SHA256.HashData(result.Data);
             }
 
             var single = ft.Select("hash_single", Transform);
@@ -296,8 +302,8 @@ namespace AssetTransformation.Tests
 
             for (int i = 0; i < singleResults.Length; i++)
             {
-                Assert.Equal(singleResults[i].Item1, multiResults[i].Item1);
-                Assert.Equal(singleResults[i].Item2, multiResults[i].Item2);
+                Assert.Equal(singleResults[i].Info, multiResults[i].Info);
+                Assert.Equal(singleResults[i].Data, multiResults[i].Data);
             }
         }
 
@@ -308,9 +314,9 @@ namespace AssetTransformation.Tests
 
             var ft = new FileTransform(_appName, files);
 
-            var txtOnly = ft.Where((bytes, info) => info.Extension.Equals(".txt", StringComparison.OrdinalIgnoreCase));
+            var txtOnly = ft.Where(r => r.Info.Extension.Equals(".txt", StringComparison.OrdinalIgnoreCase));
 
-            Assert.All(txtOnly.Results, r => Assert.Equal(".txt", r.Item1.Extension));
+            Assert.All(txtOnly.Results, r => Assert.Equal(".txt", r.Info.Extension));
         }
 
         [Fact]
@@ -325,7 +331,7 @@ namespace AssetTransformation.Tests
 
             Assert.Equal(files.Length, combined.Results.Length);
 
-            var combinedNames = combined.Results.Select(r => r.Item1.Name).ToArray();
+            var combinedNames = combined.Results.Select(r => r.Info.Name).ToArray();
             var originalNames = files.Select(Path.GetFileName).ToArray();
 
             Assert.Equal(originalNames, combinedNames);
@@ -343,8 +349,8 @@ namespace AssetTransformation.Tests
             var matches = split[0];
             var nonMatches = split[1];
 
-            Assert.All(matches.Results, r => Assert.Equal(".txt", r.Item1.Extension));
-            //Assert.All(nonMatches.Results, r => Assert.EndsWith(".txt", r.Item1, StringComparison.OrdinalIgnoreCase));
+            Assert.All(matches.Results, r => Assert.Equal(".txt", r.Info.Extension));
+            //Assert.All(nonMatches.Results, r => Assert.EndsWith(".txt", r.Info, StringComparison.OrdinalIgnoreCase));
         }
 
         [Fact]
@@ -361,7 +367,7 @@ namespace AssetTransformation.Tests
                 string ext = kvp.Key;
                 var groupFt = kvp.Value;
 
-                Assert.All(groupFt.Results, r => Assert.Equal(ext, r.Item1.Extension));
+                Assert.All(groupFt.Results, r => Assert.Equal(ext, r.Info.Extension));
             }
         }
 
@@ -373,10 +379,11 @@ namespace AssetTransformation.Tests
             var ft = new FileTransform(_appName, files);
 
             int count = 0;
-            foreach (var (name, bytes, sender) in ft)
+            foreach (var result in ft)
             {
-                Assert.NotNull(name);
-                Assert.NotNull(bytes);
+                Assert.NotNull(result);
+                Assert.NotNull(result.Info);
+                Assert.NotNull(result.Data);
                 count++;
             }
 
@@ -396,7 +403,7 @@ namespace AssetTransformation.Tests
 
             for (int i = 0; i < files.Length; i++)
             {
-                Assert.Equal(Path.GetFileName(files[i]), results[i].Item1.Name);
+                Assert.Equal(Path.GetFileName(files[i]), results[i].Info.Name);
             }
         }
     }

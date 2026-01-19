@@ -45,7 +45,7 @@ namespace AssetTransformation
 
             for (int i = 0; i < files.Length; i++)
             {
-                transforms[i] = new TransformResult(new FileInfo(files[i]), File.ReadAllBytes(files[i]),string.Empty);
+                transforms[i] = new TransformResult(new FileInfo(files[i]), File.ReadAllBytes(files[i]), string.Empty, string.Empty);
             }
 
             appRootPath = Path.Combine(
@@ -102,12 +102,13 @@ namespace AssetTransformation
                     File.WriteAllText(cachePath + ".json", result.AdditionalInfo);
                     CacheMiss?.Invoke();
 
-                    fileCaches[i] = new(result.Info, transformed, result.AdditionalInfo);
+                    fileCaches[i] = new(result.Info, transformed, result.AdditionalInfo, cachePath);
                 }
                 else
                 {
                     cachedFiles.Remove(cacheName);
-                    fileCaches[i] = new(result.Info, File.ReadAllBytes(cachePath), File.ReadAllText(cachePath + ".json"));
+                    cachedFiles.Remove(cacheName + ".json");
+                    fileCaches[i] = new(result.Info, File.ReadAllBytes(cachePath), File.ReadAllText(cachePath + ".json"), cachePath);
                 }
             }
 
@@ -160,12 +161,13 @@ namespace AssetTransformation
                     File.WriteAllText(cachePath + ".json", result.AdditionalInfo);
                     CacheMiss?.Invoke();
 
-                    fileCaches[i] = new(result.Info, transformed, result.AdditionalInfo);
+                    fileCaches[i] = new(result.Info, transformed, result.AdditionalInfo, cachePath);
                 }
                 else
                 {
                     cachedFiles.Remove(cacheName);
-                    fileCaches[i] = new(result.Info, File.ReadAllBytes(cachePath), File.ReadAllText(cachePath + ".json"));
+                    cachedFiles.Remove(cacheName + ".json");
+                    fileCaches[i] = new(result.Info, File.ReadAllBytes(cachePath), File.ReadAllText(cachePath + ".json"), cachePath);
                 }
             });
 

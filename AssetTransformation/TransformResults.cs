@@ -12,7 +12,9 @@ namespace AssetTransformation
     /// <param name="data">The transformed data as a byte array. Contains the output produced by the transformation process.</param>
     /// <param name="additionalInfo">Additional information related to the transformation. May include context, status messages, or other relevant
     /// details.</param>
-    public class TransformResult(FileInfo info, byte[] data, string additionalInfo)
+    /// <param name="cachePath">The cache path related to the transformation process. May indicate where temporary or cached files are stored during transformation.</param>
+
+    public class TransformResult(FileInfo info, byte[] data, string? additionalInfo, string? cachePath)
     {
         /// <summary>
         /// Gets the metadata of the file that was transformed.
@@ -25,6 +27,10 @@ namespace AssetTransformation
         /// <summary>
         /// Gets additional information related to the transformation.
         /// </summary>
-        public string AdditionalInfo { get; set; } = additionalInfo;
+        public string? AdditionalInfo { get; set; } = additionalInfo;
+        /// <summary>
+        ///  Gets the cache path related to the transformation process.
+        /// </summary>
+        public string? CachePath { get; internal set; } = cachePath;
     }
 }

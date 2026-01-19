@@ -25,6 +25,6 @@ namespace AssetTransformation
         /// <summary>
         /// Gets additional information related to the transformation.
         /// </summary>
-        public string AdditionalInfo { get; internal set; } = additionalInfo;
+        public string AdditionalInfo { get; set; } = additionalInfo;
     }
 }
